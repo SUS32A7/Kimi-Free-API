@@ -17,6 +17,11 @@ Reasons for modification:
 
 1. Updated models.ts model list to support latest models like kimi-k2-0905-preview, kimi-k2-thinking, kimi-latest, etc.
 
+2. **Added Connect RPC API support** with automatic Token type-based API selection
+   - Support for new Connect RPC protocol (using kimi-auth Cookie)
+   - Maintain traditional API compatibility (using refresh_token)
+   - Automatic Token type detection and API routing
+
 3. Repackaged new version of Docker image: `akashrajpuroh1t/kimi-free-api-fix:latest`
 
 4. Fixed malicious code issues in source code and repackaged. The original project contained obfuscated code at the end of `src/api/chat.js` file
@@ -24,6 +29,13 @@ Reasons for modification:
 > PS: Model names don't actually matter much, just for convenience and aesthetics. Whatever model is used online in Chat calls is the actual model used. You can fill in any model name.
 
 ### Version Notes
+
+- v1.0.1 (2025-11-28)
+    - Added Connect RPC API support (TypeScript implementation)
+    - Implemented automatic Token type detection and API routing
+    - Added dual API support: Traditional API (full features) + Connect RPC (basic conversation)
+    - Updated README access instructions to distinguish between two API methods
+    - Optimized code structure, added `src/lib/connect-rpc/` module
 
 - v1.0.0-fix (2025-11-25)
     - Modified default homepage style, added access methods and example code
@@ -75,7 +87,9 @@ This uses the [Translation Agent](https://kimi.moonshot.cn/chat/coo6l3pkqq4ri39f
 
 ## Access Preparation
 
-Get refresh_token from [kimi.moonshot.cn](https://kimi.moonshot.cn)
+### Method 1: Traditional API (Full Features)
+
+Get `refresh_token` from [kimi.moonshot.cn](https://kimi.moonshot.cn)
 
 Start any conversation on Kimi, then open developer tools with F12, find the value of `refresh_token` in Application > Local Storage. This will be used as the Bearer Token value for Authorization: `Authorization: Bearer TOKEN`
 
@@ -84,6 +98,58 @@ Start any conversation on Kimi, then open developer tools with F12, find the val
 If you see that `refresh_token` is an array, please use `.` to concatenate it before using.
 
 ![example8](./doc/example-8.jpg)
+
+**Supported Features:**
+- ✅ Basic conversation
+- ✅ Multi-turn conversation (conversation_id)
+- ✅ Internet search
+- ✅ Deep research
+- ✅ File upload
+- ✅ Image parsing
+- ✅ Agent conversation
+- ✅ Exploration version
+- ✅ K1/K2 models
+
+### Method 2: Connect RPC API (New, Basic Conversation Only)
+
+Get `kimi-auth` Cookie from [kimi.moonshot.cn](https://kimi.moonshot.cn)
+
+1. Visit https://kimi.moonshot.cn and login
+2. Open developer tools with F12
+3. Go to Application > Cookies > https://www.kimi.com
+4. Find `kimi-auth` Cookie
+5. Copy the complete JWT token value (starts with `eyJ`)
+
+This will be used as the Bearer Token value for Authorization: `Authorization: Bearer JWT_TOKEN`
+
+**Supported Features:**
+- ✅ Basic conversation
+- ✅ Streaming response
+- ✅ Different scenarios (K2, Search, Research)
+- ❌ **Not Supported**: Multi-turn conversation, file upload, image parsing, agent conversation
+
+**Comparison:**
+
+| Feature | Traditional API (refresh_token) | Connect RPC (kimi-auth) |
+|---------|--------------------------------|------------------------|
+| Token Location | LocalStorage | Cookie |
+| Token Format | JWT (typ: refresh) | JWT (typ: access) |
+| Basic Chat | ✅ | ✅ |
+| Multi-turn | ✅ | ❌ |
+| File Upload | ✅ | ❌ |
+| Image Parsing | ✅ | ❌ |
+| Agent | ✅ | ❌ |
+| Stability | Stable | Latest API |
+
+**Auto Selection:**
+
+The service automatically selects the appropriate API based on token type:
+- JWT Token (typ: access) → Uses Connect RPC API
+- Refresh Token (typ: refresh) → Uses Traditional API
+
+**Recommendation:**
+- For full features, use **Traditional API** (refresh_token)
+- For basic conversation only, use **Connect RPC** (kimi-auth)
 
 ### Multi-account Access
 

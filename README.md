@@ -17,15 +17,27 @@
 
 ## 更新说明
 
-1. 更新models.ts 模型列表，支持kimi-k2-0905-preview、kimi-k2-thinking、kimi-latest等最新模型
+1. 更新 models.ts 模型列表，支持 kimi-k2-0905-preview、kimi-k2-thinking、kimi-latest 等最新模型
 
-3. 重新打包新版本的docker镜像，`akashrajpuroh1t/kimi-free-api-fix:latest`
+2. **新增 Connect RPC API 支持**，自动根据 Token 类型选择 API
+   - 支持新版 Connect RPC 协议（使用 kimi-auth Cookie）
+   - 保持传统 API 兼容（使用 refresh_token）
+   - 自动检测 Token 类型并路由到对应 API
 
-4. 已修复源码中恶意代码问题，并重新打包，原项目包含混淆代码在`src/api/chat.js`文件末尾处
+3. 重新打包新版本的 docker 镜像，`akashrajpuroh1t/kimi-free-api-fix:latest`
 
-> PS：模型名称实际上并没啥用，只是方便和好看，实际上线上Chat调用是啥模型，就用的啥模型，模型名称随便填都可以。
+4. 已修复源码中恶意代码问题，并重新打包，原项目包含混淆代码在 `src/api/chat.js` 文件末尾处
+
+> PS：模型名称实际上并没啥用，只是方便和好看，实际上线上 Chat 调用是啥模型，就用的啥模型，模型名称随便填都可以。
 
 ### 版本说明
+
+- v1.0.1 (2025-11-28)
+    - 新增 Connect RPC API 支持（TypeScript 实现）
+    - 实现自动 Token 类型检测和 API 路由
+    - 添加双 API 支持：传统 API (完整功能) + Connect RPC (基本对话)
+    - 更新 README 接入说明，区分两种 API 方式
+    - 优化代码结构，添加 `src/lib/connect-rpc/` 模块
 
 - v1.0.0-fix (2025-11-25)
     - 修改默认首页样式，添加接入方式和示例代码
@@ -77,19 +89,73 @@
 
 ## 接入准备
 
-从 [kimi.moonshot.cn](https://kimi.moonshot.cn) 获取refresh_token
+### 方式一：传统 API（完整功能）
 
-进入kimi随便发起一个对话，然后F12打开开发者工具，从Application > Local Storage中找到`refresh_token`的值，这将作为Authorization的Bearer Token值：`Authorization: Bearer TOKEN`
+从 [kimi.moonshot.cn](https://kimi.moonshot.cn) 获取 `refresh_token`
+
+进入 kimi 随便发起一个对话，然后 F12 打开开发者工具，从 Application > Local Storage 中找到 `refresh_token` 的值，这将作为 Authorization 的 Bearer Token 值：`Authorization: Bearer TOKEN`
 
 ![example0](./doc/example-0.png)
 
-如果你看到的`refresh_token`是一个数组，请使用`.`拼接起来再使用。
+如果你看到的 `refresh_token` 是一个数组，请使用 `.` 拼接起来再使用。
 
 ![example8](./doc/example-8.jpg)
 
+**支持的功能：**
+- ✅ 基本对话
+- ✅ 多轮对话（conversation_id）
+- ✅ 联网搜索
+- ✅ 深度研究
+- ✅ 文件上传
+- ✅ 图像解析
+- ✅ 智能体对话
+- ✅ 探索版
+- ✅ K1/K2 模型
+
+### 方式二：Connect RPC API（新版，仅基本对话）
+
+从 [kimi.moonshot.cn](https://kimi.moonshot.cn) 获取 `kimi-auth` Cookie
+
+1. 访问 https://kimi.moonshot.cn 并登录
+2. F12 打开开发者工具
+3. 切换到 Application > Cookies > https://www.kimi.com
+4. 找到 `kimi-auth` Cookie
+5. 复制完整的 JWT token 值（以 `eyJ` 开头）
+
+这将作为 Authorization 的 Bearer Token 值：`Authorization: Bearer JWT_TOKEN`
+
+**支持的功能：**
+- ✅ 基本对话
+- ✅ 流式响应
+- ✅ 不同场景（K2、搜索、研究）
+- ❌ **不支持**：多轮对话、文件上传、图像解析、智能体对话
+
+**区别说明：**
+
+| 特性 | 传统 API (refresh_token) | Connect RPC (kimi-auth) |
+|------|------------------------|------------------------|
+| Token 位置 | LocalStorage | Cookie |
+| Token 格式 | JWT (typ: refresh) | JWT (typ: access) |
+| 基本对话 | ✅ | ✅ |
+| 多轮对话 | ✅ | ❌ |
+| 文件上传 | ✅ | ❌ |
+| 图像解析 | ✅ | ❌ |
+| 智能体 | ✅ | ❌ |
+| 稳定性 | 较稳定 | 最新 API |
+
+**自动选择：**
+
+服务会根据 Token 类型自动选择对应的 API：
+- JWT Token (typ: access) → 使用 Connect RPC API
+- Refresh Token (typ: refresh) → 使用传统 API
+
+**推荐：**
+- 如需完整功能，使用**传统 API** (refresh_token)
+- 如仅需基本对话，可使用**Connect RPC** (kimi-auth)
+
 ### 多账号接入
 
-目前kimi限制普通账号每3小时内只能进行30轮长文本的问答（短文本不限），你可以通过提供多个账号的refresh_token并使用`,`拼接提供：
+目前 kimi 限制普通账号每 3 小时内只能进行 30 轮长文本的问答（短文本不限），你可以通过提供多个账号的 refresh_token 并使用 `,` 拼接提供：
 
 `Authorization: Bearer TOKEN1,TOKEN2,TOKEN3`
 
