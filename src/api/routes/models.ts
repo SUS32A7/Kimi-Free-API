@@ -1,7 +1,22 @@
 import _ from 'lodash';
-
 // 支持的模型列表，基于官方API返回的模型
 const SUPPORTED_MODELS = [
+    // kimi-k2.5 模型（最新旗舰）
+    {
+        "id": "kimi-k2.5",
+        "name": "K2.5",
+        "object": "model",
+        "owned_by": "moonshot",
+        "description": "256k上下文，原生多模态旗舰模型，支持视觉、代码、Agent Swarm"
+    },
+    {
+        "id": "kimi-k2.5-thinking",
+        "name": "K2.5-Thinking",
+        "object": "model",
+        "owned_by": "moonshot",
+        "description": "K2.5长思考模型，256k上下文，深度推理与多步工具调用"
+    },
+
     // kimi-k2 模型
     {
         "id": "kimi-k2-0905-preview",
@@ -92,25 +107,19 @@ const SUPPORTED_MODELS = [
         "description": "最新视觉模型，128k上下文图片理解"
     }
 ];
-
 export default {
-
     prefix: '/v1',
-
     get: {
         '/models': async () => {
             return {
                 "data": SUPPORTED_MODELS
             };
         }
-
     }
 }
-
 // 导出模型验证函数
 export function isValidModel(modelId: string): boolean {
     return SUPPORTED_MODELS.some(model => model.id === modelId);
 }
-
 // 导出默认模型
 export const DEFAULT_MODEL = "moonshot-v1-8k";
