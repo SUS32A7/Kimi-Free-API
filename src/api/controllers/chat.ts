@@ -68,6 +68,7 @@ function resolveModel(model: string): {
   isK1Model: boolean;
   isK2Model: boolean;
   isK25Model: boolean;
+  isThinkingModel: boolean;
 } {
   const isK1Model = model.indexOf('k1') != -1;
   const isK2Model = model.indexOf('k2') != -1 && model.indexOf('k2.5') == -1;
@@ -75,6 +76,7 @@ function resolveModel(model: string): {
   const isMath = model.indexOf('math') != -1;
   const isSearchModel = model.indexOf('search') != -1;
   const isResearchModel = model.indexOf('research') != -1;
+  const isThinkingModel = model.indexOf('thinking') != -1;
 
   let kimiplusId: string;
   if (isK25Model) {
@@ -90,7 +92,7 @@ function resolveModel(model: string): {
     kimiplusId = 'kimi';
   }
 
-  return { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK2Model, isK25Model };
+  return { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK2Model, isK25Model, isThinkingModel };
 }
 
 /**
@@ -341,7 +343,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
   return (async () => {
     logger.info(messages);
 
-    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model } = resolveModel(model);
+    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model, isThinkingModel } = resolveModel(model);
 
     // 创建会话
     const convId = /[0-9a-zA-Z]{20}/.test(refConvId) ? refConvId : await createConversation(model, "未命名会话", refreshToken);
@@ -380,7 +382,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
     tokenSize(sendMessages[0].content, refs, refreshToken, convId)
       .catch(err => logger.warn('tokenSize请求失败，继续主要流程:', err.message));
 
-    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}`);
+    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}，是否思考模型: ${isThinkingModel}`);
 
     if (segmentId)
       logger.info(`继续请求，segmentId: ${segmentId}`);
@@ -412,6 +414,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
         use_math: isMath,
         use_research: isResearchModel,
         use_search: isSearchModel,
+        use_thinking: isThinkingModel,
         extend: { sidebar: true }
       },
       headers: {
@@ -458,7 +461,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
   return (async () => {
     logger.info(messages);
 
-    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model } = resolveModel(model);
+    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model, isThinkingModel } = resolveModel(model);
 
     // 创建会话
     const convId = /[0-9a-zA-Z]{20}/.test(refConvId) ? refConvId : await createConversation(model, "未命名会话", refreshToken);
@@ -494,7 +497,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
     tokenSize(sendMessages[0].content, refs, refreshToken, convId)
       .catch(err => logger.warn('tokenSize请求失败，继续主要流程:', err.message));
 
-    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}`);
+    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}，是否思考模型: ${isThinkingModel}`);
 
     // 检查探索版使用量
     if (isResearchModel) {
@@ -517,6 +520,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
         use_math: isMath,
         use_research: isResearchModel,
         use_search: isSearchModel,
+        use_thinking: isThinkingModel,
         extend: { sidebar: true }
       },
       headers: {
