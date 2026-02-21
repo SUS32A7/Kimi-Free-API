@@ -3,7 +3,6 @@
  * 
  * TypeScript type definitions for Connect RPC protocol
  */
-
 /**
  * Connect RPC 配置
  */
@@ -19,19 +18,17 @@ export interface ConnectConfig {
     /** 用户 ID (可选，从 Token 解析) */
     userId?: string;
 }
-
 /**
  * 聊天选项
  */
 export interface ChatOptions {
     /** 场景类型 */
-    scenario?: 'SCENARIO_K2' | 'SCENARIO_SEARCH' | 'SCENARIO_RESEARCH' | 'SCENARIO_K1';
+    scenario?: 'SCENARIO_K2_5' | 'SCENARIO_K2' | 'SCENARIO_SEARCH' | 'SCENARIO_RESEARCH' | 'SCENARIO_K1';
     /** 是否启用思考模式 */
     thinking?: boolean;
     /** 是否流式响应 */
     stream?: boolean;
 }
-
 /**
  * 消息块
  */
@@ -41,7 +38,6 @@ export interface MessageBlock {
         content: string;
     };
 }
-
 /**
  * 聊天消息
  */
@@ -50,7 +46,6 @@ export interface ChatMessage {
     blocks: MessageBlock[];
     scenario: string;
 }
-
 /**
  * 聊天请求
  */
@@ -61,7 +56,6 @@ export interface ChatRequest {
         thinking: boolean;
     };
 }
-
 /**
  * Connect 响应消息
  */
@@ -101,7 +95,6 @@ export interface ConnectMessage {
     /** 完成标记 */
     done?: {};
 }
-
 /**
  * 提取的文本响应
  */
