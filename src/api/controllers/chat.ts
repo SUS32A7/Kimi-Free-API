@@ -988,10 +988,21 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
     }
     catch (err) {
       logger.error(err);
-      !transStream.closed && transStream.end('\n\n');
+      !transStream.closed && transStream.end('data: [DONE]\n\n');
     }
   });
-  stream.on("data", buffer => parser.feed(buffer.toString()));
+  let temp = Buffer.from('');
+  stream.on("data", buffer => {
+    if (buffer.toString().indexOf('\uFFFD') != -1) {
+      temp = Buffer.concat([temp, buffer]);
+      return;
+    }
+    if (temp.length > 0) {
+      buffer = Buffer.concat([temp, buffer]);
+      temp = Buffer.from('');
+    }
+    parser.feed(buffer.toString());
+  });
   stream.once("error", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
   stream.once("close", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
   return transStream;
