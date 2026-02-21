@@ -19,25 +19,15 @@ const MODEL_NAME = 'kimi';
 
 /**
  * 从 Authorization 头提取 Token
- * 
- * 支持两种格式：
- * 1. Bearer <kimi-auth-jwt-token>  (Connect RPC 使用的 JWT)
- * 2. Bearer <refresh-token>         (传统 API 使用的 refresh token)
- * 3. x-goog-api-key: <token>        (也支持x-goog-api-key头)
- * 
- * @param ctx Koa Context
- * @returns Token 字符串
  */
 function extractAuthToken(ctx: Context): string {
     const authorization = ctx.request.headers['authorization'];
     const apiKey = ctx.request.headers['x-goog-api-key'];
 
-    // Debug logging
     console.log('DEBUG: All headers:', JSON.stringify(ctx.request.headers, null, 2));
     console.log('DEBUG: Auth header found:', authorization);
     console.log('DEBUG: API key found:', apiKey);
 
-    // Try Authorization header first, then x-goog-api-key
     let tokenHeader = authorization;
     if (!tokenHeader && apiKey) {
         tokenHeader = `Bearer ${apiKey}`;
@@ -47,7 +37,6 @@ function extractAuthToken(ctx: Context): string {
         throw new APIException(EX.API_REQUEST_FAILED, 'Missing Authorization header or x-goog-api-key');
     }
 
-    // 移除 "Bearer " 前缀
     const token = tokenHeader.replace(/^Bearer\s+/i, '').trim();
 
     if (!token) {
@@ -59,37 +48,45 @@ function extractAuthToken(ctx: Context): string {
 
 /**
  * 判断 Token 类型
- * 
- * @param token Token 字符串
- * @returns 'jwt' | 'refresh'
  */
 export function detectTokenType(token: string): 'jwt' | 'refresh' {
-    // JWT token 通常以 "eyJ" 开头（Base64 编码的 JSON）
-    // 且包含两个点分隔符
     if (token.startsWith('eyJ') && token.split('.').length === 3) {
-        // 进一步验证：尝试解析 JWT payload
         try {
             const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-            // 检查是否包含 Connect RPC JWT 的特征字段
             if (payload.app_id === 'kimi' && payload.typ === 'access') {
                 return 'jwt';
             }
         } catch (e) {
-            // 解析失败，可能是其他类型的 token
+            // 解析失败
         }
     }
-
-    // 默认作为 refresh token 处理（兼容现有 API）
     return 'refresh';
 }
 
 /**
+ * 将模型名称映射到 Connect RPC 场景
+ * 支持 kimi-k2.5 和 kimi-k2.5-thinking
+ */
+function resolveScenario(model: string): { scenario: string; thinking: boolean } {
+    const thinking = model.includes('thinking');
+
+    if (model.includes('k2.5')) {
+        // kimi-k2.5 maps to K2 scenario — Kimi's backend will serve K2.5
+        // automatically as it is the latest K2-series model
+        return { scenario: 'SCENARIO_K2', thinking };
+    } else if (model.includes('search')) {
+        return { scenario: 'SCENARIO_SEARCH', thinking };
+    } else if (model.includes('research')) {
+        return { scenario: 'SCENARIO_RESEARCH', thinking };
+    } else if (model.includes('k1')) {
+        return { scenario: 'SCENARIO_K1', thinking };
+    } else {
+        return { scenario: 'SCENARIO_K2', thinking };
+    }
+}
+
+/**
  * 使用 Connect RPC 创建聊天补全
- * 
- * @param model 模型名称
- * @param messages 消息列表
- * @param authToken JWT Token (从 Authorization 头提取)
- * @returns 聊天响应
  */
 export async function createCompletionV2(
     model: string,
@@ -98,7 +95,6 @@ export async function createCompletionV2(
 ): Promise<any> {
     logger.info(`Using Connect RPC API with model: ${model}`);
 
-    // 验证 Token 类型
     const tokenType = detectTokenType(authToken);
 
     if (tokenType !== 'jwt') {
@@ -108,50 +104,36 @@ export async function createCompletionV2(
         );
     }
 
-    // 提取消息内容
     const lastMessage = messages[messages.length - 1];
     let messageContent = '';
 
     if (typeof lastMessage.content === 'string') {
         messageContent = lastMessage.content;
     } else if (Array.isArray(lastMessage.content)) {
-        // 处理多模态内容
         messageContent = lastMessage.content
             .filter((item: any) => item.type === 'text')
             .map((item: any) => item.text)
             .join('\n');
     }
 
-    // 创建 Connect RPC 配置
     const config: ConnectConfig = {
         baseUrl: 'https://www.kimi.com',
         authToken: authToken,
-        // 可选：从 JWT 中解析这些值
         deviceId: extractDeviceIdFromJWT(authToken),
         sessionId: extractSessionIdFromJWT(authToken),
         userId: extractUserIdFromJWT(authToken),
     };
 
-    // 创建客户端
     const client = new ConnectRPCClient(config);
 
-    // 确定场景类型
-    let scenario = 'SCENARIO_K2';
-    if (model.includes('search')) {
-        scenario = 'SCENARIO_SEARCH';
-    } else if (model.includes('research')) {
-        scenario = 'SCENARIO_RESEARCH';
-    } else if (model.includes('k1')) {
-        scenario = 'SCENARIO_K1';
-    }
+    const { scenario, thinking } = resolveScenario(model);
+    logger.info(`Model: ${model} → scenario: ${scenario}, thinking: ${thinking}`);
 
-    // 发送请求
     const response = await client.chatText(messageContent, {
         scenario: scenario as any,
-        thinking: model.includes('thinking'),
+        thinking,
     });
 
-    // 转换为 OpenAI 兼容格式
     return {
         id: response.chatId || util.uuid(),
         model: model,
@@ -213,11 +195,6 @@ function extractUserIdFromJWT(token: string): string | undefined {
 
 /**
  * 使用 Connect RPC 创建流式聊天补全
- * 
- * @param model 模型名称
- * @param messages 消息列表
- * @param authToken JWT Token
- * @returns 流式响应
  */
 export async function createCompletionStreamV2(
     model: string,
@@ -226,7 +203,6 @@ export async function createCompletionStreamV2(
 ): Promise<PassThrough> {
     logger.info(`Using Connect RPC API (streaming) with model: ${model}`);
 
-    // 验证 Token 类型
     const tokenType = detectTokenType(authToken);
 
     if (tokenType !== 'jwt') {
@@ -236,7 +212,6 @@ export async function createCompletionStreamV2(
         );
     }
 
-    // 提取消息内容
     const lastMessage = messages[messages.length - 1];
     let messageContent = '';
 
@@ -249,7 +224,6 @@ export async function createCompletionStreamV2(
             .join('\n');
     }
 
-    // 创建配置
     const config: ConnectConfig = {
         baseUrl: 'https://www.kimi.com',
         authToken: authToken,
@@ -258,31 +232,20 @@ export async function createCompletionStreamV2(
         userId: extractUserIdFromJWT(authToken),
     };
 
-    // 创建客户端
     const client = new ConnectRPCClient(config);
 
-    // 确定场景
-    let scenario = 'SCENARIO_K2';
-    if (model.includes('search')) {
-        scenario = 'SCENARIO_SEARCH';
-    } else if (model.includes('research')) {
-        scenario = 'SCENARIO_RESEARCH';
-    } else if (model.includes('k1')) {
-        scenario = 'SCENARIO_K1';
-    }
+    const { scenario, thinking } = resolveScenario(model);
+    logger.info(`Model: ${model} → scenario: ${scenario}, thinking: ${thinking}`);
 
-    // 创建流
     const stream = new PassThrough();
 
-    // 异步处理
     (async () => {
         try {
             const connectMessages = await client.chat(messageContent, {
                 scenario: scenario as any,
-                thinking: model.includes('thinking'),
+                thinking,
             });
 
-            // 转换为 SSE 格式
             for (const msg of connectMessages) {
                 if (msg.block?.text?.content) {
                     const chunk = {
@@ -305,7 +268,6 @@ export async function createCompletionStreamV2(
                 }
 
                 if (msg.done) {
-                    // 发送结束标记
                     const endChunk = {
                         id: util.uuid(),
                         object: 'chat.completion.chunk',
