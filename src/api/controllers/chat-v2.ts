@@ -71,9 +71,7 @@ function resolveScenario(model: string): { scenario: string; thinking: boolean }
     const thinking = model.includes('thinking');
 
     if (model.includes('k2.5')) {
-        // kimi-k2.5 maps to K2 scenario — Kimi's backend will serve K2.5
-        // automatically as it is the latest K2-series model
-        return { scenario: 'SCENARIO_K2', thinking };
+        return { scenario: 'SCENARIO_K2_5', thinking };
     } else if (model.includes('search')) {
         return { scenario: 'SCENARIO_SEARCH', thinking };
     } else if (model.includes('research')) {
