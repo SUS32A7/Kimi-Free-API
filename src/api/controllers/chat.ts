@@ -58,6 +58,42 @@ const accessTokenMap = new Map();
 const accessTokenRequestQueueMap: Record<string, Function[]> = {};
 
 /**
+ * 解析模型名称，返回 kimiplusId 和各功能标志
+ */
+function resolveModel(model: string): {
+  kimiplusId: string;
+  isMath: boolean;
+  isSearchModel: boolean;
+  isResearchModel: boolean;
+  isK1Model: boolean;
+  isK2Model: boolean;
+  isK25Model: boolean;
+} {
+  const isK1Model = model.indexOf('k1') != -1;
+  const isK2Model = model.indexOf('k2') != -1 && model.indexOf('k2.5') == -1;
+  const isK25Model = model.indexOf('k2.5') != -1;
+  const isMath = model.indexOf('math') != -1;
+  const isSearchModel = model.indexOf('search') != -1;
+  const isResearchModel = model.indexOf('research') != -1;
+
+  let kimiplusId: string;
+  if (isK25Model) {
+    // kimi-k2.5 uses a custom kimiplus_id — falls back to 'kimi' to let Kimi
+    // web route to its latest model automatically (same behaviour as before for k2)
+    kimiplusId = 'kimi';
+  } else if (isK1Model) {
+    kimiplusId = 'crm40ee9e5jvhsn7ptcg';
+  } else if (/^[0-9a-z]{20}$/.test(model)) {
+    // custom agent ID
+    kimiplusId = model;
+  } else {
+    kimiplusId = 'kimi';
+  }
+
+  return { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK2Model, isK25Model };
+}
+
+/**
  * 检测 Token 类型
  * @param token Token 字符串
  * @returns 'jwt' | 'refresh'
@@ -114,10 +150,6 @@ function extractUserIdFromJWT(token: string): string | undefined {
 
 /**
  * 请求access_token
- * 
- * 使用refresh_token去刷新获得access_token
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function requestToken(refreshToken: string) {
   if (accessTokenRequestQueueMap[refreshToken])
@@ -177,10 +209,6 @@ async function requestToken(refreshToken: string) {
 
 /**
  * 获取缓存中的access_token
- * 
- * 避免短时间大量刷新token，未加锁，如果有并发要求还需加锁
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function acquireToken(refreshToken: string): Promise<any> {
   let result = accessTokenMap.get(refreshToken);
@@ -229,19 +257,16 @@ export async function request(
 
 /**
  * 创建会话
- * 
- * 创建临时的会话用于对话补全
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function createConversation(model: string, name: string, refreshToken: string) {
+  const { kimiplusId } = resolveModel(model);
   const {
     id: convId
   } = await request('POST', '/api/chat', refreshToken, {
     data: {
       enter_method: 'new_chat',
       is_example: false,
-      kimiplus_id: /^[0-9a-z]{20}$/.test(model) ? model : 'kimi',
+      kimiplus_id: kimiplusId,
       name
     }
   });
@@ -250,10 +275,6 @@ async function createConversation(model: string, name: string, refreshToken: str
 
 /**
  * 移除会话
- * 
- * 在对话流传输完毕后移除会话，避免创建的会话出现在用户的对话列表中
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function removeConversation(convId: string, refreshToken: string) {
   return await request('DELETE', `/api/chat/${convId}`, refreshToken);
@@ -261,8 +282,6 @@ async function removeConversation(convId: string, refreshToken: string) {
 
 /**
  * 获取建议
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function getSuggestion(query: string, refreshToken: string) {
   return await request('POST', '/api/suggestion', refreshToken, {
@@ -278,21 +297,13 @@ async function getSuggestion(query: string, refreshToken: string) {
 
 /**
  * 预处理N2S
- * 
- * 预处理N2S，用于获取搜索结果
- * 
- * @param model 模型名称
- * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
- * @param refs 引用文件ID列表
- * @param refreshToken 用于刷新access_token的refresh_token
- * @param refConvId 引用会话ID
  */
 async function preN2s(model: string, messages: { role: string, content: string }[], refs: string[], refreshToken: string, refConvId?: string) {
-  const isSearchModel = model.indexOf('search') != -1;
+  const { kimiplusId, isSearchModel } = resolveModel(model);
   return await request('POST', `/api/chat/${refConvId}/pre-n2s`, refreshToken, {
     data: {
       is_pro_search: false,
-      kimiplus_id: /^[0-9a-z]{20}$/.test(model) ? model : 'kimi',
+      kimiplus_id: kimiplusId,
       messages,
       refs,
       use_search: isSearchModel
@@ -302,10 +313,6 @@ async function preN2s(model: string, messages: { role: string, content: string }
 
 /**
  * token计数
- * 
- * @param query 查询内容
- * @param refreshToken 用于刷新access_token的refresh_token
- * @param refConvId 引用会话ID
  */
 async function tokenSize(query: string, refs: string[], refreshToken: string, refConvId: string) {
   return await request('POST', `/api/chat/${refConvId}/token_size`, refreshToken, {
@@ -318,8 +325,6 @@ async function tokenSize(query: string, refs: string[], refreshToken: string, re
 
 /**
  * 获取探索版使用量
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function getResearchUsage(refreshToken: string): Promise<{
   remain,
@@ -331,16 +336,12 @@ async function getResearchUsage(refreshToken: string): Promise<{
 
 /**
  * 同步对话补全
- * 
- * @param model 模型名称
- * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
- * @param refreshToken 用于刷新access_token的refresh_token
- * @param refConvId 引用会话ID
- * @param retryCount 重试次数
  */
 async function createCompletion(model = MODEL_NAME, messages: any[], refreshToken: string, refConvId?: string, retryCount = 0, segmentId?: string): Promise<IStreamMessage> {
   return (async () => {
     logger.info(messages);
+
+    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model } = resolveModel(model);
 
     // 创建会话
     const convId = /[0-9a-zA-Z]{20}/.test(refConvId) ? refConvId : await createConversation(model, "未命名会话", refreshToken);
@@ -369,7 +370,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
     // 消息预处理
     const sendMessages = messagesPrepare(messages, !!refConvId);
 
-    // 异步处理可选的API调用，添加错误处理避免影响主要流程
+    // 异步处理可选的API调用
     if (!segmentId) {
       preN2s(model, sendMessages, refs, refreshToken, convId)
         .catch(err => logger.warn('preN2s请求失败，继续主要流程:', err.message));
@@ -379,12 +380,7 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
     tokenSize(sendMessages[0].content, refs, refreshToken, convId)
       .catch(err => logger.warn('tokenSize请求失败，继续主要流程:', err.message));
 
-    const isMath = model.indexOf('math') != -1;
-    const isSearchModel = model.indexOf('search') != -1;
-    const isResearchModel = model.indexOf('research') != -1;
-    const isK1Model = model.indexOf('k1') != -1;
-
-    logger.info(`使用模型: ${model}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否数学模型: ${isMath}`);
+    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}`);
 
     if (segmentId)
       logger.info(`继续请求，segmentId: ${segmentId}`);
@@ -399,8 +395,6 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
         throw new APIException(EX.API_RESEARCH_EXCEEDS_LIMIT, `探索版使用量已达到上限`);
       logger.info(`探索版当前额度: ${used}/${total}`);
     }
-
-    const kimiplusId = isK1Model ? 'crm40ee9e5jvhsn7ptcg' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
 
     // 请求补全流
     const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
@@ -439,8 +433,6 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
 
     logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
 
-    // 异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
-    // 如果引用会话将不会清除，因为我们不知道什么时候你会结束会话
     !refConvId && removeConversation(convId, refreshToken)
       .catch(err => console.error(err));
 
@@ -461,16 +453,12 @@ async function createCompletion(model = MODEL_NAME, messages: any[], refreshToke
 
 /**
  * 流式对话补全
- * 
- * @param model 模型名称
- * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
- * @param refreshToken 用于刷新access_token的refresh_token
- * @param refConvId 引用会话ID
- * @param retryCount 重试次数
  */
 async function createCompletionStream(model = MODEL_NAME, messages: any[], refreshToken: string, refConvId?: string, retryCount = 0) {
   return (async () => {
     logger.info(messages);
+
+    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model } = resolveModel(model);
 
     // 创建会话
     const convId = /[0-9a-zA-Z]{20}/.test(refConvId) ? refConvId : await createConversation(model, "未命名会话", refreshToken);
@@ -498,7 +486,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
 
     const sendMessages = messagesPrepare(messages, !!refConvId);
 
-    // 异步处理可选的API调用，添加错误处理避免影响主要流程
+    // 异步处理可选的API调用
     preN2s(model, sendMessages, refs, refreshToken, convId)
       .catch(err => logger.warn('preN2s请求失败，继续主要流程:', err.message));
     getSuggestion(sendMessages[0].content, refreshToken)
@@ -506,12 +494,7 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
     tokenSize(sendMessages[0].content, refs, refreshToken, convId)
       .catch(err => logger.warn('tokenSize请求失败，继续主要流程:', err.message));
 
-    const isMath = model.indexOf('math') != -1;
-    const isSearchModel = model.indexOf('search') != -1;
-    const isResearchModel = model.indexOf('research') != -1;
-    const isK1Model = model.indexOf('k1') != -1;
-
-    logger.info(`使用模型: ${model}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否数学模型: ${isMath}`);
+    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}`);
 
     // 检查探索版使用量
     if (isResearchModel) {
@@ -523,8 +506,6 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
         throw new APIException(EX.API_RESEARCH_EXCEEDS_LIMIT, `探索版使用量已达到上限`);
       logger.info(`探索版当前额度: ${used}/${total}`);
     }
-
-    const kimiplusId = isK1Model ? 'crm40ee9e5jvhsn7ptcg' : (/^[0-9a-z]{20}$/.test(model) ? model : 'kimi');
 
     // 请求补全流
     const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
@@ -545,11 +526,8 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
     });
 
     const streamStartTime = util.timestamp();
-    // 创建转换流将消息格式转换为gpt兼容格式
     return createTransStream(model, convId, stream, () => {
       logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
-      // 流传输结束后异步移除会话，如果消息不合规，此操作可能会抛出数据库错误异常，请忽略
-      // 如果引用会话将不会清除，因为我们不知道什么时候你会结束会话
       !refConvId && removeConversation(convId, refreshToken)
         .catch(err => console.error(err));
     });
@@ -569,10 +547,6 @@ async function createCompletionStream(model = MODEL_NAME, messages: any[], refre
 
 /**
  * 调用一些接口伪装访问
- * 
- * 随机挑一个
- * 
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function fakeRequest(refreshToken: string) {
   await [
@@ -602,25 +576,19 @@ async function fakeRequest(refreshToken: string) {
 
 /**
  * 提取消息中引用的文件URL
- * 
- * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
  */
 function extractRefFileUrls(messages: any[]) {
   const urls = [];
-  // 如果没有消息，则返回[]
   if (!messages.length) {
     return urls;
   }
-  // 只获取最新的消息
   const lastMessage = messages[messages.length - 1];
   if (_.isArray(lastMessage.content)) {
     lastMessage.content.forEach(v => {
       if (!_.isObject(v) || !['file', 'image_url'].includes(v['type']))
         return;
-      // kimi-free-api支持格式
       if (v['type'] == 'file' && _.isObject(v['file_url']) && _.isString(v['file_url']['url']))
         urls.push(v['file_url']['url']);
-      // 兼容gpt-4-vision-preview API格式
       else if (v['type'] == 'image_url' && _.isObject(v['image_url']) && _.isString(v['image_url']['url']))
         urls.push(v['image_url']['url']);
     });
@@ -631,14 +599,6 @@ function extractRefFileUrls(messages: any[]) {
 
 /**
  * 消息预处理
- * 
- * 由于接口只取第一条消息，此处会将多条消息合并为一条，实现多轮对话效果
- * user:旧消息1
- * assistant:旧消息2
- * user:新消息
- * 
- * @param messages 参考gpt系列消息格式，多轮对话请完整提供上下文
- * @param isRefConv 是否为引用会话
  */
 function messagesPrepare(messages: any[], isRefConv = false) {
   let content;
@@ -655,11 +615,9 @@ function messagesPrepare(messages: any[], isRefConv = false) {
     logger.info("\n透传内容：\n" + content);
   }
   else {
-    // 注入消息提升注意力
     let latestMessage = messages[messages.length - 1];
     let hasFileOrImage = Array.isArray(latestMessage.content)
       && latestMessage.content.some(v => (typeof v === 'object' && ['file', 'image_url'].includes(v['type'])));
-    // 第二轮开始注入system prompt
     if (hasFileOrImage) {
       let newFileMessage = {
         "content": "关注用户最新发送文件和消息",
@@ -694,10 +652,6 @@ function messagesPrepare(messages: any[], isRefConv = false) {
 
 /**
  * 将消息中的URL包装为HTML标签
- * 
- * kimi网页版中会自动将url包装为url标签用于处理状态，此处也得模仿处理，否则无法成功解析
- * 
- * @param content 消息内容
  */
 function wrapUrlsToTags(content: string) {
   return content.replace(/https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=]*)/gi, url => `<url id="" type="url" status="" title="" wc="">${url}</url>`);
@@ -705,9 +659,6 @@ function wrapUrlsToTags(content: string) {
 
 /**
  * 获取预签名的文件URL
- * 
- * @param filename 文件名称
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 async function preSignUrl(action: string, filename: string, refreshToken: string) {
   const {
@@ -732,8 +683,6 @@ async function preSignUrl(action: string, filename: string, refreshToken: string
 
 /**
  * 预检查文件URL有效性
- * 
- * @param fileUrl 文件URL
  */
 async function checkFileUrl(fileUrl: string) {
   if (util.isBASE64Data(fileUrl))
@@ -744,7 +693,6 @@ async function checkFileUrl(fileUrl: string) {
   });
   if (result.status >= 400)
     throw new APIException(EX.API_FILE_URL_INVALID, `File ${fileUrl} is not valid: [${result.status}] ${result.statusText}`);
-  // 检查文件大小
   if (result.headers && result.headers['content-length']) {
     const fileSize = parseInt(result.headers['content-length'], 10);
     if (fileSize > FILE_MAX_SIZE)
@@ -754,47 +702,35 @@ async function checkFileUrl(fileUrl: string) {
 
 /**
  * 上传文件
- * 
- * @param fileUrl 文件URL
- * @param refreshToken 用于刷新access_token的refresh_token
- * @param refConvId 引用会话ID
  */
 async function uploadFile(fileUrl: string, refreshToken: string, refConvId?: string) {
-  // 预检查远程文件URL可用性
   await checkFileUrl(fileUrl);
 
   let filename, fileData, mimeType;
-  // 如果是BASE64数据则直接转换为Buffer
   if (util.isBASE64Data(fileUrl)) {
     mimeType = util.extractBASE64DataFormat(fileUrl);
     const ext = mime.getExtension(mimeType);
     filename = `${util.uuid()}.${ext}`;
     fileData = Buffer.from(util.removeBASE64DataHeader(fileUrl), 'base64');
   }
-  // 下载文件到内存，如果您的服务器内存很小，建议考虑改造为流直传到下一个接口上，避免停留占用内存
   else {
     filename = path.basename(fileUrl);
     ({ data: fileData } = await axios.get(fileUrl, {
       responseType: 'arraybuffer',
-      // 100M限制
       maxContentLength: FILE_MAX_SIZE,
-      // 60秒超时
       timeout: 60000
     }));
   }
 
   const fileType = (mimeType || '').includes('image') ? 'image' : 'file';
 
-  // 获取预签名文件URL
   let {
     url: uploadUrl,
     object_name: objectName,
     file_id: fileId
   } = await preSignUrl(fileType, filename, refreshToken);
 
-  // 获取文件的MIME类型
   mimeType = mimeType || mime.getType(filename);
-  // 上传文件到目标OSS
   const {
     accessToken,
     userId
@@ -803,9 +739,7 @@ async function uploadFile(fileUrl: string, refreshToken: string, refConvId?: str
     method: 'PUT',
     url: uploadUrl,
     data: fileData,
-    // 100M限制
     maxBodyLength: FILE_MAX_SIZE,
-    // 120秒超时
     timeout: 120000,
     headers: {
       'Content-Type': mimeType,
@@ -823,7 +757,6 @@ async function uploadFile(fileUrl: string, refreshToken: string, refConvId?: str
   while (status != 'initialized' && status != 'parsed') {
     if (Date.now() - startTime > 30000)
       throw new Error('文件等待处理超时');
-    // 获取文件上传结果
     result = await axios.post('https://kimi.moonshot.cn/api/file', fileType == 'image' ? {
       type: 'image',
       file_id: fileId,
@@ -851,7 +784,6 @@ async function uploadFile(fileUrl: string, refreshToken: string, refConvId?: str
   while (!parseFinish) {
     if (Date.now() - startTime > 30000)
       throw new Error('文件等待处理超时');
-    // 处理文件转换
     parseFinish = await new Promise(resolve => {
       axios.post('https://kimi.moonshot.cn/api/file/parse_process', {
         ids: [fileId],
@@ -874,9 +806,6 @@ async function uploadFile(fileUrl: string, refreshToken: string, refConvId?: str
 
 /**
  * 检查请求结果
- * 
- * @param result 结果
- * @param refreshToken 用于刷新access_token的refresh_token
  */
 function checkResult(result: AxiosResponse, refreshToken: string) {
   if (result.status == 401) {
@@ -897,16 +826,11 @@ function checkResult(result: AxiosResponse, refreshToken: string) {
 
 /**
  * 从流接收完整的消息内容
- * 
- * @param model 模型名称
- * @param convId 会话ID
- * @param stream 消息流
  */
 async function receiveStream(model: string, convId: string, stream: any): Promise<IStreamMessage> {
   let webSearchCount = 0;
   let temp = Buffer.from('');
   return new Promise((resolve, reject) => {
-    // 消息初始化
     const data = {
       id: convId,
       model,
@@ -923,51 +847,39 @@ async function receiveStream(model: string, convId: string, stream: any): Promis
     const parser = createParser(event => {
       try {
         if (event.type !== "event") return;
-        // 解析JSON
         const result = _.attempt(() => JSON.parse(event.data));
         if (_.isError(result))
           throw new Error(`Stream response invalid: ${event.data}`);
-        // 处理消息
         if (result.event == 'cmpl' && result.text) {
           data.choices[0].message.content += result.text;
         }
-        // 处理请求ID
         else if (result.event == 'req') {
           data.segment_id = result.id;
         }
-        // 处理超长文本
         else if (result.event == 'length') {
           logger.warn('此次生成达到max_tokens，稍候将继续请求拼接完整响应');
           data.choices[0].finish_reason = 'length';
         }
-        // 处理结束或错误
         else if (result.event == 'all_done' || result.event == 'error') {
           data.choices[0].message.content += (result.event == 'error' ? '\n[内容由于不合规被停止生成，我们换个话题吧]' : '') + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
           refContent = '';
           resolve(data);
         }
-        // 处理联网搜索
         else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
           webSearchCount += 1;
           refContent += `【检索 ${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
         }
-        // else
-        //   logger.warn(result.event, result);
       }
       catch (err) {
         logger.error(err);
         reject(err);
       }
     });
-    // 将流数据喂给SSE转换器
     stream.on("data", buffer => {
-      // 检查buffer是否以完整UTF8字符结尾
       if (buffer.toString().indexOf('�') != -1) {
-        // 如果不完整则累积buffer直到收到完整字符
         temp = Buffer.concat([temp, buffer]);
         return;
       }
-      // 将之前累积的不完整buffer拼接
       if (temp.length > 0) {
         buffer = Buffer.concat([temp, buffer]);
         temp = Buffer.from('');
@@ -981,18 +893,9 @@ async function receiveStream(model: string, convId: string, stream: any): Promis
 
 /**
  * 创建转换流
- * 
- * 将流格式转换为gpt兼容流格式
- * 
- * @param model 模型名称
- * @param convId 会话ID
- * @param stream 消息流
- * @param endCallback 传输结束回调
  */
 function createTransStream(model: string, convId: string, stream: any, endCallback?: Function) {
-  // 消息创建时间
   const created = util.unixTimestamp();
-  // 创建转换流
   const transStream = new PassThrough();
   let webSearchCount = 0;
   let searchFlag = false;
@@ -1012,13 +915,11 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
   const parser = createParser(event => {
     try {
       if (event.type !== "event") return;
-      // 解析JSON
       const result = _.attempt(() => JSON.parse(event.data));
       if (_.isError(result))
         throw new Error(`Stream response invalid: ${event.data}`);
-      // 处理消息
       if (result.event == 'cmpl') {
-        const exceptCharIndex = result.text.indexOf("�");
+        const exceptCharIndex = result.text.indexOf("᛫");
         const chunk = result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
         const data = `data: ${JSON.stringify({
           id: convId,
@@ -1034,15 +935,12 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
           searchFlag = false;
         !transStream.closed && transStream.write(data);
       }
-      // 处理请求ID
       else if (result.event == 'req') {
         segmentId = result.id;
       }
-      // 处理超长文本
       else if (result.event == 'length') {
         lengthExceed = true;
       }
-      // 处理结束或错误
       else if (result.event == 'all_done' || result.event == 'error') {
         const data = `data: ${JSON.stringify({
           id: convId,
@@ -1063,7 +961,6 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
         !transStream.closed && transStream.end('data: [DONE]\n\n');
         endCallback && endCallback();
       }
-      // 处理联网搜索
       else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
         if (!searchFlag)
           searchFlag = true;
@@ -1084,15 +981,12 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
         })}\n\n`;
         !transStream.closed && transStream.write(data);
       }
-      // else
-      //   logger.warn(result.event, result);
     }
     catch (err) {
       logger.error(err);
       !transStream.closed && transStream.end('\n\n');
     }
   });
-  // 将流数据喂给SSE转换器
   stream.on("data", buffer => parser.feed(buffer.toString()));
   stream.once("error", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
   stream.once("close", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
@@ -1101,8 +995,6 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
 
 /**
  * Token切分
- * 
- * @param authorization 认证字符串
  */
 function tokenSplit(authorization: string) {
   return authorization.replace('Bearer ', '').split(',');
