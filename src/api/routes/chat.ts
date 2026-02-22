@@ -1,1034 +1,302 @@
-import { PassThrough } from "stream";
-import path from 'path';
-import _ from 'lodash';
-import mime from 'mime';
-import axios, { AxiosRequestConfig, AxiosResponse } from 'axios';
+/**
+ * Connect RPC Chat Controller (V2)
+ * 
+ * 使用 Connect RPC 协议的新版聊天控制器
+ * Token 从客户端请求的 Authorization 头中获取
+ */
 
-import type IStreamMessage from "../interfaces/IStreamMessage.ts";
-import APIException from "@/lib/exceptions/APIException.ts";
-import EX from "@/api/consts/exceptions.ts";
-import { createParser } from 'eventsource-parser'
-import logger from '@/lib/logger.ts';
-import util from '@/lib/util.ts';
-// Connect RPC imports
+import { PassThrough } from "stream";
+import type { Context } from 'koa';
 import { ConnectRPCClient } from '@/lib/connect-rpc';
 import type { ConnectConfig } from '@/lib/connect-rpc/types.ts';
+import APIException from "@/lib/exceptions/APIException.ts";
+import EX from "@/api/consts/exceptions.ts";
+import logger from '@/lib/logger.ts';
+import util from '@/lib/util.ts';
 
 // 模型名称
 const MODEL_NAME = 'kimi';
-// 设备ID
-// Use BigInt arithmetic to avoid JS float precision loss on large integers
-const DEVICE_ID = String(BigInt(7000000000000000000) + BigInt(Math.floor(Math.random() * 999999999999999999)));
-// SessionID
-const SESSION_ID = String(BigInt(1700000000000000000) + BigInt(Math.floor(Math.random() * 99999999999999999)));
-// access_token有效期
-const ACCESS_TOKEN_EXPIRES = 300;
-// 最大重试次数
-const MAX_RETRY_COUNT = 3;
-// 重试延迟
-const RETRY_DELAY = 5000;
-// 基础URL
-const BASE_URL = 'https://kimi.moonshot.cn';
-// 伪装headers
-const FAKE_HEADERS = {
-  'Accept': '*/*',
-  'Accept-Encoding': 'gzip, deflate, br, zstd',
-  'Accept-Language': 'zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache',
-  'Origin': BASE_URL,
-  'Cookie': util.generateCookie(),
-  'R-Timezone': 'Asia/Shanghai',
-  'Sec-Ch-Ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-  'Sec-Ch-Ua-Mobile': '?0',
-  'Sec-Ch-Ua-Platform': '"Windows"',
-  'Sec-Fetch-Dest': 'empty',
-  'Sec-Fetch-Mode': 'cors',
-  'Sec-Fetch-Site': 'same-origin',
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-  'Priority': 'u=1, i',
-  'X-Msh-Device-Id': `${DEVICE_ID}`,
-  'X-Msh-Platform': 'web',
-  'X-Msh-Session-Id': `${SESSION_ID}`
-};
-// 文件最大大小
-const FILE_MAX_SIZE = 100 * 1024 * 1024;
-// access_token映射
-const accessTokenMap = new Map();
-// access_token请求队列映射
-const accessTokenRequestQueueMap: Record<string, Function[]> = {};
 
 /**
- * 解析模型名称，返回 kimiplusId 和各功能标志
+ * 从 Authorization 头提取 Token
  */
-function resolveModel(model: string): {
-  kimiplusId: string;
-  isMath: boolean;
-  isSearchModel: boolean;
-  isResearchModel: boolean;
-  isK1Model: boolean;
-  isK2Model: boolean;
-  isK25Model: boolean;
-  isThinkingModel: boolean;
-} {
-  const isK1Model = model.indexOf('k1') != -1;
-  const isK2Model = model.indexOf('k2') != -1 && model.indexOf('k2.5') == -1;
-  const isK25Model = model.indexOf('k2.5') != -1;
-  const isMath = model.indexOf('math') != -1;
-  const isSearchModel = model.indexOf('search') != -1;
-  const isResearchModel = model.indexOf('research') != -1;
-  const isThinkingModel = model.indexOf('thinking') != -1;
+function extractAuthToken(ctx: Context): string {
+    const authorization = ctx.request.headers['authorization'];
+    const apiKey = ctx.request.headers['x-goog-api-key'];
 
-  let kimiplusId: string;
-  if (isK25Model) {
-    // kimi-k2.5 uses a custom kimiplus_id — falls back to 'kimi' to let Kimi
-    // web route to its latest model automatically (same behaviour as before for k2)
-    kimiplusId = 'kimi';
-  } else if (isK1Model) {
-    kimiplusId = 'crm40ee9e5jvhsn7ptcg';
-  } else if (/^[0-9a-z]{20}$/.test(model)) {
-    // custom agent ID
-    kimiplusId = model;
-  } else {
-    kimiplusId = 'kimi';
-  }
+    let tokenHeader = authorization;
+    if (!tokenHeader && apiKey) {
+        tokenHeader = `Bearer ${apiKey}`;
+    }
 
-  return { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK2Model, isK25Model, isThinkingModel };
+    if (!tokenHeader) {
+        throw new APIException(EX.API_REQUEST_FAILED, 'Missing Authorization header or x-goog-api-key');
+    }
+
+    const token = tokenHeader.replace(/^Bearer\s+/i, '').trim();
+
+    if (!token) {
+        throw new APIException(EX.API_REQUEST_FAILED, 'Invalid Authorization header format');
+    }
+
+    return token;
 }
 
 /**
- * 检测 Token 类型
- * @param token Token 字符串
- * @returns 'jwt' | 'refresh'
+ * 判断 Token 类型
  */
 export function detectTokenType(token: string): 'jwt' | 'refresh' {
-  if (token.startsWith('eyJ') && token.split('.').length === 3) {
-    try {
-      const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-      if (payload.app_id === 'kimi' && payload.typ === 'access') {
-        return 'jwt';
-      }
-    } catch (e) {
-      // 解析失败，作为 refresh token 处理
+    if (token.startsWith('eyJ') && token.split('.').length === 3) {
+        try {
+            const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+            if (payload.app_id === 'kimi' && payload.typ === 'access') {
+                return 'jwt';
+            }
+        } catch (e) {
+            // 解析失败
+        }
     }
-  }
-  return 'refresh';
+    return 'refresh';
+}
+
+/**
+ * 将模型名称映射到 Connect RPC 场景
+ * 支持 kimi-k2.5 和 kimi-k2.5-thinking
+ */
+function resolveScenario(model: string): { scenario: string; thinking: boolean } {
+    const thinking = model.includes('thinking');
+
+    if (model.includes('k2.5')) {
+        return { scenario: 'SCENARIO_K2_5', thinking };
+    } else if (model.includes('search')) {
+        return { scenario: 'SCENARIO_SEARCH', thinking };
+    } else if (model.includes('research')) {
+        return { scenario: 'SCENARIO_RESEARCH', thinking };
+    } else if (model.includes('k1')) {
+        return { scenario: 'SCENARIO_K1', thinking };
+    } else {
+        return { scenario: 'SCENARIO_K2', thinking };
+    }
+}
+
+/**
+ * 使用 Connect RPC 创建聊天补全
+ */
+export async function createCompletionV2(
+    model: string,
+    messages: any[],
+    authToken: string
+): Promise<any> {
+    logger.info(`Using Connect RPC API with model: ${model}`);
+
+    const tokenType = detectTokenType(authToken);
+
+    if (tokenType !== 'jwt') {
+        throw new APIException(
+            EX.API_REQUEST_FAILED,
+            'Connect RPC requires JWT token. Please extract kimi-auth from browser cookies. See docs/CONNECT_RPC_CONFIG_GUIDE.md'
+        );
+    }
+
+    const messageContent = buildFullPrompt(messages);
+
+    const config: ConnectConfig = {
+        baseUrl: 'https://www.kimi.com',
+        authToken: authToken,
+        deviceId: extractDeviceIdFromJWT(authToken),
+        sessionId: extractSessionIdFromJWT(authToken),
+        userId: extractUserIdFromJWT(authToken),
+    };
+
+    const client = new ConnectRPCClient(config);
+
+    const { scenario, thinking } = resolveScenario(model);
+    logger.info(`Model: ${model} → scenario: ${scenario}, thinking: ${thinking}`);
+
+    const response = await client.chatText(messageContent, {
+        scenario: scenario as any,
+        thinking,
+    });
+
+    return {
+        id: response.chatId || util.uuid(),
+        model: model,
+        object: 'chat.completion',
+        choices: [
+            {
+                index: 0,
+                message: {
+                    role: 'assistant',
+                    content: response.text,
+                },
+                finish_reason: 'stop',
+            },
+        ],
+        usage: {
+            prompt_tokens: messageContent.length,
+            completion_tokens: response.text.length,
+            total_tokens: messageContent.length + response.text.length,
+        },
+        created: util.unixTimestamp(),
+    };
+}
+
+/**
+ * Build a single prompt string from the full conversation history.
+ * For a single message, returns just its content.
+ * For multi-turn conversations, prefixes each turn with role: so the
+ * model understands the dialogue structure.
+ */
+function buildFullPrompt(messages: any[]): string {
+    if (!messages || messages.length === 0) return '';
+
+    const extractText = (content: any): string => {
+        if (typeof content === 'string') return content;
+        if (Array.isArray(content)) {
+            return content
+                .filter((item: any) => item.type === 'text')
+                .map((item: any) => item.text || '')
+                .join('\n');
+        }
+        return '';
+    };
+
+    if (messages.length === 1) {
+        return extractText(messages[0].content);
+    }
+
+    return messages
+        .map((msg: any) => `${msg.role || 'user'}:${extractText(msg.content)}`)
+        .join('\n');
 }
 
 /**
  * 从 JWT Token 中提取设备 ID
  */
 function extractDeviceIdFromJWT(token: string): string | undefined {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    return payload.device_id;
-  } catch (e) {
-    return undefined;
-  }
+    try {
+        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+        return payload.device_id;
+    } catch (e) {
+        return undefined;
+    }
 }
 
 /**
  * 从 JWT Token 中提取会话 ID
  */
 function extractSessionIdFromJWT(token: string): string | undefined {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    return payload.ssid;
-  } catch (e) {
-    return undefined;
-  }
+    try {
+        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+        return payload.ssid;
+    } catch (e) {
+        return undefined;
+    }
 }
 
 /**
  * 从 JWT Token 中提取用户 ID
  */
 function extractUserIdFromJWT(token: string): string | undefined {
-  try {
-    const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
-    return payload.sub;
-  } catch (e) {
-    return undefined;
-  }
-}
-
-/**
- * 请求access_token
- */
-async function requestToken(refreshToken: string) {
-  if (accessTokenRequestQueueMap[refreshToken])
-    return new Promise(resolve => accessTokenRequestQueueMap[refreshToken].push(resolve));
-  accessTokenRequestQueueMap[refreshToken] = [];
-  logger.info(`Refresh token: ${refreshToken}`);
-  const result = await (async () => {
-    const result = await axios.get(`${BASE_URL}/api/auth/token/refresh`, {
-      headers: {
-        Authorization: `Bearer ${refreshToken}`,
-        ...FAKE_HEADERS,
-      },
-      timeout: 15000,
-      validateStatus: () => true
-    });
-    const {
-      access_token,
-      refresh_token
-    } = checkResult(result, refreshToken);
-    const userResult = await axios.get(`${BASE_URL}/api/user`, {
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-        ...FAKE_HEADERS,
-      },
-      timeout: 15000,
-      validateStatus: () => true
-    });
-    if (!userResult.data.id)
-      throw new APIException(EX.API_REQUEST_FAILED, '获取用户信息失败');
-    return {
-      userId: userResult.data.id,
-      accessToken: access_token,
-      refreshToken: refresh_token,
-      refreshTime: util.unixTimestamp() + ACCESS_TOKEN_EXPIRES
-    }
-  })()
-    .then(result => {
-      if (accessTokenRequestQueueMap[refreshToken]) {
-        accessTokenRequestQueueMap[refreshToken].forEach(resolve => resolve(result));
-        delete accessTokenRequestQueueMap[refreshToken];
-      }
-      logger.success(`Refresh successful`);
-      return result;
-    })
-    .catch(err => {
-      logger.error(err);
-      if (accessTokenRequestQueueMap[refreshToken]) {
-        accessTokenRequestQueueMap[refreshToken].forEach(resolve => resolve(err));
-        delete accessTokenRequestQueueMap[refreshToken];
-      }
-      return err;
-    });
-  if (_.isError(result))
-    throw result;
-  return result;
-}
-
-/**
- * 获取缓存中的access_token
- */
-async function acquireToken(refreshToken: string): Promise<any> {
-  let result = accessTokenMap.get(refreshToken);
-  if (!result) {
-    result = await requestToken(refreshToken);
-    accessTokenMap.set(refreshToken, result);
-  }
-  if (util.unixTimestamp() > result.refreshTime) {
-    result = await requestToken(refreshToken);
-    accessTokenMap.set(refreshToken, result);
-  }
-  return result;
-}
-
-/**
- * 发送请求
- */
-export async function request(
-  method: string,
-  uri: string,
-  refreshToken: string,
-  options: AxiosRequestConfig = {}
-) {
-  const {
-    accessToken,
-    userId
-  } = await acquireToken(refreshToken);
-  logger.info(`url: ${uri}`);
-  const result = await axios({
-    method,
-    url: `${BASE_URL}${uri}`,
-    params: options.params,
-    data: options.data,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'X-Traffic-Id': userId,
-      ...FAKE_HEADERS,
-      ...(options.headers || {})
-    },
-    timeout: options.timeout || 15000,
-    responseType: options.responseType,
-    validateStatus: () => true
-  });
-  return checkResult(result, refreshToken);
-}
-
-/**
- * 创建会话
- */
-async function createConversation(model: string, name: string, refreshToken: string) {
-  const { kimiplusId } = resolveModel(model);
-  const {
-    id: convId
-  } = await request('POST', '/api/chat', refreshToken, {
-    data: {
-      enter_method: 'new_chat',
-      is_example: false,
-      kimiplus_id: kimiplusId,
-      name
-    }
-  });
-  return convId;
-}
-
-/**
- * 移除会话
- */
-async function removeConversation(convId: string, refreshToken: string) {
-  return await request('DELETE', `/api/chat/${convId}`, refreshToken);
-}
-
-/**
- * 获取建议
- */
-async function getSuggestion(query: string, refreshToken: string) {
-  return await request('POST', '/api/suggestion', refreshToken, {
-    data: {
-      offset: 0,
-      page_referer: 'chat',
-      query: query.replace('user:', '').replace('assistant:', ''),
-      scene: 'first_round',
-      size: 10
-    }
-  });
-}
-
-/**
- * 预处理N2S
- */
-async function preN2s(model: string, messages: { role: string, content: string }[], refs: string[], refreshToken: string, refConvId?: string) {
-  const { kimiplusId, isSearchModel } = resolveModel(model);
-  return await request('POST', `/api/chat/${refConvId}/pre-n2s`, refreshToken, {
-    data: {
-      is_pro_search: false,
-      kimiplus_id: kimiplusId,
-      messages,
-      refs,
-      use_search: isSearchModel
-    }
-  });
-}
-
-/**
- * token计数
- */
-async function tokenSize(query: string, refs: string[], refreshToken: string, refConvId: string) {
-  return await request('POST', `/api/chat/${refConvId}/token_size`, refreshToken, {
-    data: {
-      content: query,
-      refs: []
-    }
-  });
-}
-
-/**
- * 获取探索版使用量
- */
-async function getResearchUsage(refreshToken: string): Promise<{
-  remain,
-  total,
-  used
-}> {
-  return await request('GET', '/api/chat/research/usage', refreshToken);
-}
-
-/**
- * 同步对话补全
- */
-async function createCompletion(model = MODEL_NAME, messages: any[], refreshToken: string, refConvId?: string, retryCount = 0, segmentId?: string): Promise<IStreamMessage> {
-  return (async () => {
-    logger.info(messages);
-
-    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model, isThinkingModel } = resolveModel(model);
-
-    // 创建会话
-    const convId = /[0-9a-zA-Z]{20}/.test(refConvId) ? refConvId : await createConversation(model, "未命名会话", refreshToken);
-
-    // 提取引用文件URL并上传kimi获得引用的文件ID列表
-    const refFileUrls = extractRefFileUrls(messages);
-    const refResults = refFileUrls.length ? await Promise.all(refFileUrls.map(fileUrl => uploadFile(fileUrl, refreshToken, convId))) : [];
-    const refs = refResults.map(result => result.id);
-    const refsFile = refResults.map(result => ({
-      detail: result,
-      done: true,
-      file: {},
-      file_info: result,
-      id: result.id,
-      name: result.name,
-      parse_status: 'success',
-      size: result.size,
-      upload_progress: 100,
-      upload_status: 'success'
-    }));
-
-    // 伪装调用获取用户信息
-    fakeRequest(refreshToken)
-      .catch(err => logger.warn('fakeRequest请求失败，继续主要流程:', err.message));
-
-    // 消息预处理
-    const sendMessages = messagesPrepare(messages, !!refConvId);
-
-    // 异步处理可选的API调用
-    if (!segmentId) {
-      preN2s(model, sendMessages, refs, refreshToken, convId)
-        .catch(err => logger.warn('preN2s请求失败，继续主要流程:', err.message));
-    }
-    getSuggestion(sendMessages[0].content, refreshToken)
-      .catch(err => logger.warn('getSuggestion请求失败，继续主要流程:', err.message));
-    tokenSize(sendMessages[0].content, refs, refreshToken, convId)
-      .catch(err => logger.warn('tokenSize请求失败，继续主要流程:', err.message));
-
-    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}，是否思考模型: ${isThinkingModel}`);
-
-    if (segmentId)
-      logger.info(`继续请求，segmentId: ${segmentId}`);
-
-    // 检查探索版使用量
-    if (isResearchModel) {
-      const {
-        total,
-        used
-      } = await getResearchUsage(refreshToken);
-      if (used >= total)
-        throw new APIException(EX.API_RESEARCH_EXCEEDS_LIMIT, `探索版使用量已达到上限`);
-      logger.info(`探索版当前额度: ${used}/${total}`);
-    }
-
-    // 请求补全流
-    const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
-      data: segmentId ? {
-        segment_id: segmentId,
-        action: 'continue',
-        messages: [{ role: 'user', content: ' ' }],
-        kimiplus_id: kimiplusId,
-        extend: { sidebar: true }
-      } : {
-        kimiplus_id: kimiplusId,
-        messages: sendMessages,
-        refs,
-        refs_file: refsFile,
-        use_math: isMath,
-        use_research: isResearchModel,
-        use_search: isSearchModel,
-        use_thinking: isThinkingModel,
-        extend: { sidebar: true }
-      },
-      headers: {
-        Referer: `https://kimi.moonshot.cn/chat/${convId}`
-      },
-      responseType: 'stream'
-    });
-
-    const streamStartTime = util.timestamp();
-
-    // 接收流为输出文本
-    const answer = await receiveStream(model, convId, stream);
-
-    // 如果上次请求生成长度超限，则继续请求
-    if (answer.choices[0].finish_reason == 'length' && answer.segment_id) {
-      const continueAnswer = await createCompletion(model, [], refreshToken, convId, retryCount, answer.segment_id);
-      answer.choices[0].message.content += continueAnswer.choices[0].message.content;
-    }
-
-    logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
-
-    !refConvId && removeConversation(convId, refreshToken)
-      .catch(err => console.error(err));
-
-    return answer;
-  })()
-    .catch(err => {
-      if (retryCount < MAX_RETRY_COUNT) {
-        logger.error(`Stream response error: ${err.message}`);
-        logger.warn(`Try again after ${RETRY_DELAY / 1000}s...`);
-        return (async () => {
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-          return createCompletion(model, messages, refreshToken, refConvId, retryCount + 1);
-        })();
-      }
-      throw err;
-    });
-}
-
-/**
- * 流式对话补全
- */
-async function createCompletionStream(model = MODEL_NAME, messages: any[], refreshToken: string, refConvId?: string, retryCount = 0) {
-  return (async () => {
-    logger.info(messages);
-
-    const { kimiplusId, isMath, isSearchModel, isResearchModel, isK1Model, isK25Model, isThinkingModel } = resolveModel(model);
-
-    // 创建会话
-    const convId = /[0-9a-zA-Z]{20}/.test(refConvId) ? refConvId : await createConversation(model, "未命名会话", refreshToken);
-
-    // 提取引用文件URL并上传kimi获得引用的文件ID列表
-    const refFileUrls = extractRefFileUrls(messages);
-    const refResults = refFileUrls.length ? await Promise.all(refFileUrls.map(fileUrl => uploadFile(fileUrl, refreshToken, convId))) : [];
-    const refs = refResults.map(result => result.id);
-    const refsFile = refResults.map(result => ({
-      detail: result,
-      done: true,
-      file: {},
-      file_info: result,
-      id: result.id,
-      name: result.name,
-      parse_status: 'success',
-      size: result.size,
-      upload_progress: 100,
-      upload_status: 'success'
-    }));
-
-    // 伪装调用获取用户信息
-    fakeRequest(refreshToken)
-      .catch(err => logger.error(err));
-
-    const sendMessages = messagesPrepare(messages, !!refConvId);
-
-    // 异步处理可选的API调用
-    preN2s(model, sendMessages, refs, refreshToken, convId)
-      .catch(err => logger.warn('preN2s请求失败，继续主要流程:', err.message));
-    getSuggestion(sendMessages[0].content, refreshToken)
-      .catch(err => logger.warn('getSuggestion请求失败，继续主要流程:', err.message));
-    tokenSize(sendMessages[0].content, refs, refreshToken, convId)
-      .catch(err => logger.warn('tokenSize请求失败，继续主要流程:', err.message));
-
-    logger.info(`使用模型: ${model}，kimiplusId: ${kimiplusId}，是否联网检索: ${isSearchModel}，是否探索版: ${isResearchModel}，是否K1模型: ${isK1Model}，是否K2.5模型: ${isK25Model}，是否数学模型: ${isMath}，是否思考模型: ${isThinkingModel}`);
-
-    // 检查探索版使用量
-    if (isResearchModel) {
-      const {
-        total,
-        used
-      } = await getResearchUsage(refreshToken);
-      if (used >= total)
-        throw new APIException(EX.API_RESEARCH_EXCEEDS_LIMIT, `探索版使用量已达到上限`);
-      logger.info(`探索版当前额度: ${used}/${total}`);
-    }
-
-    // 请求补全流
-    const stream = await request('POST', `/api/chat/${convId}/completion/stream`, refreshToken, {
-      data: {
-        kimiplus_id: kimiplusId,
-        messages: sendMessages,
-        refs,
-        refs_file: refsFile,
-        use_math: isMath,
-        use_research: isResearchModel,
-        use_search: isSearchModel,
-        use_thinking: isThinkingModel,
-        extend: { sidebar: true }
-      },
-      headers: {
-        Referer: `https://kimi.moonshot.cn/chat/${convId}`
-      },
-      responseType: 'stream'
-    });
-
-    const streamStartTime = util.timestamp();
-    return createTransStream(model, convId, stream, () => {
-      logger.success(`Stream has completed transfer ${util.timestamp() - streamStartTime}ms`);
-      !refConvId && removeConversation(convId, refreshToken)
-        .catch(err => console.error(err));
-    });
-  })()
-    .catch(err => {
-      if (retryCount < MAX_RETRY_COUNT) {
-        logger.error(`Stream response error: ${err.message}`);
-        logger.warn(`Try again after ${RETRY_DELAY / 1000}s...`);
-        return (async () => {
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
-          return createCompletionStream(model, messages, refreshToken, refConvId, retryCount + 1);
-        })();
-      }
-      throw err;
-    });
-}
-
-/**
- * 调用一些接口伪装访问
- */
-async function fakeRequest(refreshToken: string) {
-  await [
-    () => request('GET', '/api/user', refreshToken),
-    () => request('POST', '/api/user/usage', refreshToken, {
-      data: {
-        usage: ['kimiv', 'math']
-      }
-    }),
-    () => request('GET', '/api/chat_1m/user/status', refreshToken),
-    () => request('GET', '/api/kimi_mv/user/status', refreshToken),
-    () => request('POST', '/api/kimiplus/history', refreshToken),
-    () => request('POST', '/api/kimiplus/search', refreshToken, {
-      data: {
-        offset: 0,
-        size: 20
-      }
-    }),
-    () => request('POST', '/api/chat/list', refreshToken, {
-      data: {
-        offset: 0,
-        size: 50
-      }
-    }),
-  ][Math.floor(Math.random() * 7)]();
-}
-
-/**
- * 提取消息中引用的文件URL
- */
-function extractRefFileUrls(messages: any[]) {
-  const urls = [];
-  if (!messages.length) {
-    return urls;
-  }
-  const lastMessage = messages[messages.length - 1];
-  if (_.isArray(lastMessage.content)) {
-    lastMessage.content.forEach(v => {
-      if (!_.isObject(v) || !['file', 'image_url'].includes(v['type']))
-        return;
-      if (v['type'] == 'file' && _.isObject(v['file_url']) && _.isString(v['file_url']['url']))
-        urls.push(v['file_url']['url']);
-      else if (v['type'] == 'image_url' && _.isObject(v['image_url']) && _.isString(v['image_url']['url']))
-        urls.push(v['image_url']['url']);
-    });
-  }
-  logger.info("本次请求上传：" + urls.length + "个文件");
-  return urls;
-}
-
-/**
- * 消息预处理
- */
-function messagesPrepare(messages: any[], isRefConv = false) {
-  // Work on a shallow copy to avoid mutating the caller's array (which breaks retries)
-  messages = [...messages];
-
-  const extractText = (message: any): string => {
-    if (_.isArray(message.content)) {
-      return message.content.reduce((_content: string, v: any) => {
-        if (!_.isObject(v) || v['type'] != 'text') return _content;
-        return _content + `${v["text"] || ""}`;
-      }, '');
-    }
-    return message.role == 'user' ? wrapUrlsToTags(message.content) : (message.content || '');
-  };
-
-  // Separate system messages from conversation turns
-  const systemMessages = messages.filter(m => m.role === 'system');
-  const conversationMessages = messages.filter(m => m.role !== 'system');
-
-  // Build system prompt block
-  const systemPrompt = systemMessages.map(m => extractText(m)).filter(Boolean).join('\n');
-
-  // Build conversation history
-  const conversationHistory = conversationMessages.map(m => {
-    const role = m.role === 'assistant' ? 'assistant' : 'user';
-    return `${role}: ${extractText(m)}`;
-  }).join('\n');
-
-  // Frame the full prompt so Kimi understands it must only respond as the AI character
-  let content = '';
-  if (systemPrompt) {
-    content += `[Instructions - follow these exactly]:\n${systemPrompt}\n\n`;
-  }
-  content += `[IMPORTANT: Only write the response for "assistant". Never write lines for "user". Continue the roleplay as the assistant character only.]\n\n`;
-  if (conversationHistory) {
-    content += `[Conversation history]:\n${conversationHistory}\n\n`;
-  }
-  content += `assistant:`;
-
-  logger.info("\n构建提示词：\n" + content);
-
-  return [
-    { role: 'user', content }
-  ]
-}
-
-/**
- * 将消息中的URL包装为HTML标签
- */
-function wrapUrlsToTags(content: string) {
-  return content.replace(/https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{2,256}\.[a-z]{2,6}\b([-a-zA-Z0-9@:%_\+.~#?&//=]*)/gi, url => `<url id="" type="url" status="" title="" wc="">${url}</url>`);
-}
-
-/**
- * 获取预签名的文件URL
- */
-async function preSignUrl(action: string, filename: string, refreshToken: string) {
-  const {
-    accessToken,
-    userId
-  } = await acquireToken(refreshToken);
-  const result = await axios.post('https://kimi.moonshot.cn/api/pre-sign-url', {
-    action,
-    name: filename
-  }, {
-    timeout: 15000,
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      Referer: `https://kimi.moonshot.cn/`,
-      'X-Traffic-Id': userId,
-      ...FAKE_HEADERS
-    },
-    validateStatus: () => true
-  });
-  return checkResult(result, refreshToken);
-}
-
-/**
- * 预检查文件URL有效性
- */
-async function checkFileUrl(fileUrl: string) {
-  if (util.isBASE64Data(fileUrl))
-    return;
-  const result = await axios.head(fileUrl, {
-    timeout: 15000,
-    validateStatus: () => true
-  });
-  if (result.status >= 400)
-    throw new APIException(EX.API_FILE_URL_INVALID, `File ${fileUrl} is not valid: [${result.status}] ${result.statusText}`);
-  if (result.headers && result.headers['content-length']) {
-    const fileSize = parseInt(result.headers['content-length'], 10);
-    if (fileSize > FILE_MAX_SIZE)
-      throw new APIException(EX.API_FILE_EXECEEDS_SIZE, `File ${fileUrl} is not valid`);
-  }
-}
-
-/**
- * 上传文件
- */
-async function uploadFile(fileUrl: string, refreshToken: string, refConvId?: string) {
-  await checkFileUrl(fileUrl);
-
-  let filename, fileData, mimeType;
-  if (util.isBASE64Data(fileUrl)) {
-    mimeType = util.extractBASE64DataFormat(fileUrl);
-    const ext = mime.getExtension(mimeType);
-    filename = `${util.uuid()}.${ext}`;
-    fileData = Buffer.from(util.removeBASE64DataHeader(fileUrl), 'base64');
-  }
-  else {
-    filename = path.basename(fileUrl);
-    ({ data: fileData } = await axios.get(fileUrl, {
-      responseType: 'arraybuffer',
-      maxContentLength: FILE_MAX_SIZE,
-      timeout: 60000
-    }));
-  }
-
-  const fileType = (mimeType || '').includes('image') ? 'image' : 'file';
-
-  let {
-    url: uploadUrl,
-    object_name: objectName,
-    file_id: fileId
-  } = await preSignUrl(fileType, filename, refreshToken);
-
-  mimeType = mimeType || mime.getType(filename);
-  const {
-    accessToken,
-    userId
-  } = await acquireToken(refreshToken);
-  let result = await axios.request({
-    method: 'PUT',
-    url: uploadUrl,
-    data: fileData,
-    maxBodyLength: FILE_MAX_SIZE,
-    timeout: 120000,
-    headers: {
-      'Content-Type': mimeType,
-      Authorization: `Bearer ${accessToken}`,
-      Referer: `https://kimi.moonshot.cn/`,
-      'X-Traffic-Id': userId,
-      ...FAKE_HEADERS
-    },
-    validateStatus: () => true
-  });
-  checkResult(result, refreshToken);
-
-  let status, startTime = Date.now();
-  let fileDetail;
-  while (status != 'initialized' && status != 'parsed') {
-    if (Date.now() - startTime > 30000)
-      throw new Error('文件等待处理超时');
-    result = await axios.post('https://kimi.moonshot.cn/api/file', fileType == 'image' ? {
-      type: 'image',
-      file_id: fileId,
-      name: filename
-    } : {
-      type: 'file',
-      name: filename,
-      object_name: objectName,
-      file_id: '',
-      chat_id: refConvId
-    }, {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        Referer: `https://kimi.moonshot.cn/`,
-        'X-Traffic-Id': userId,
-        ...FAKE_HEADERS
-      }
-    });
-    fileDetail = checkResult(result, refreshToken);
-    ({ id: fileId, status } = fileDetail);
-  }
-
-  startTime = Date.now();
-  let parseFinish = status == 'parsed';
-  while (!parseFinish) {
-    if (Date.now() - startTime > 30000)
-      throw new Error('文件等待处理超时');
-    parseFinish = await new Promise(resolve => {
-      axios.post('https://kimi.moonshot.cn/api/file/parse_process', {
-        ids: [fileId],
-        timeout: 120000
-      }, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          Referer: `https://kimi.moonshot.cn/`,
-          'X-Traffic-Id': userId,
-          ...FAKE_HEADERS
-        }
-      })
-        .then(() => resolve(true))
-        .catch(() => resolve(false));
-    });
-  }
-
-  return fileDetail;
-}
-
-/**
- * 检查请求结果
- */
-function checkResult(result: AxiosResponse, refreshToken: string) {
-  if (result.status == 401) {
-    accessTokenMap.delete(refreshToken);
-    throw new APIException(EX.API_REQUEST_FAILED);
-  }
-  if (!result.data)
-    return null;
-  const { error_type, message } = result.data;
-  if (!_.isString(error_type))
-    return result.data;
-  if (error_type == 'auth.token.invalid')
-    accessTokenMap.delete(refreshToken);
-  if (error_type == 'chat.user_stream_pushing')
-    throw new APIException(EX.API_CHAT_STREAM_PUSHING);
-  throw new APIException(EX.API_REQUEST_FAILED, `[请求kimi失败]: ${message}`);
-}
-
-/**
- * 从流接收完整的消息内容
- */
-async function receiveStream(model: string, convId: string, stream: any): Promise<IStreamMessage> {
-  let webSearchCount = 0;
-  let temp = Buffer.from('');
-  return new Promise((resolve, reject) => {
-    const data = {
-      id: convId,
-      model,
-      object: 'chat.completion',
-      choices: [
-        { index: 0, message: { role: 'assistant', content: '' }, finish_reason: 'stop' }
-      ],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-      segment_id: '',
-      created: util.unixTimestamp()
-    };
-    let refContent = '';
-    const silentSearch = model.indexOf('silent') != -1;
-    const parser = createParser(event => {
-      try {
-        if (event.type !== "event") return;
-        const result = _.attempt(() => JSON.parse(event.data));
-        if (_.isError(result))
-          throw new Error(`Stream response invalid: ${event.data}`);
-        if (result.event == 'cmpl' && result.text) {
-          data.choices[0].message.content += result.text;
-        }
-        else if (result.event == 'req') {
-          data.segment_id = result.id;
-        }
-        else if (result.event == 'length') {
-          logger.warn('此次生成达到max_tokens，稍候将继续请求拼接完整响应');
-          data.choices[0].finish_reason = 'length';
-        }
-        else if (result.event == 'all_done' || result.event == 'error') {
-          data.choices[0].message.content += (result.event == 'error' ? '\n[内容由于不合规被停止生成，我们换个话题吧]' : '') + (refContent ? `\n\n搜索结果来自：\n${refContent}` : '');
-          refContent = '';
-          resolve(data);
-        }
-        else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
-          webSearchCount += 1;
-          refContent += `【检索 ${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n\n`;
-        }
-      }
-      catch (err) {
-        logger.error(err);
-        reject(err);
-      }
-    });
-    stream.on("data", buffer => {
-      if (buffer.toString().indexOf('�') != -1) {
-        temp = Buffer.concat([temp, buffer]);
-        return;
-      }
-      if (temp.length > 0) {
-        buffer = Buffer.concat([temp, buffer]);
-        temp = Buffer.from('');
-      }
-      parser.feed(buffer.toString());
-    });
-    stream.once("error", err => reject(err));
-    stream.once("close", () => resolve(data));
-  });
-}
-
-/**
- * 创建转换流
- */
-function createTransStream(model: string, convId: string, stream: any, endCallback?: Function) {
-  const created = util.unixTimestamp();
-  const transStream = new PassThrough();
-  let webSearchCount = 0;
-  let searchFlag = false;
-  let lengthExceed = false;
-  let segmentId = '';
-  const silentSearch = model.indexOf('silent') != -1;
-  !transStream.closed && transStream.write(`data: ${JSON.stringify({
-    id: convId,
-    model,
-    object: 'chat.completion.chunk',
-    choices: [
-      { index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }
-    ],
-    segment_id: '',
-    created
-  })}\n\n`);
-  const parser = createParser(event => {
     try {
-      if (event.type !== "event") return;
-      const result = _.attempt(() => JSON.parse(event.data));
-      if (_.isError(result))
-        throw new Error(`Stream response invalid: ${event.data}`);
-      if (result.event == 'cmpl') {
-        const exceptCharIndex = result.text.indexOf("᛫");
-        const chunk = result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
-        const data = `data: ${JSON.stringify({
-          id: convId,
-          model,
-          object: 'chat.completion.chunk',
-          choices: [
-            { index: 0, delta: { content: (searchFlag ? '\n' : '') + chunk }, finish_reason: null }
-          ],
-          segment_id: segmentId,
-          created
-        })}\n\n`;
-        if (searchFlag)
-          searchFlag = false;
-        !transStream.closed && transStream.write(data);
-      }
-      else if (result.event == 'req') {
-        segmentId = result.id;
-      }
-      else if (result.event == 'length') {
-        lengthExceed = true;
-      }
-      else if (result.event == 'all_done' || result.event == 'error') {
-        const data = `data: ${JSON.stringify({
-          id: convId,
-          model,
-          object: 'chat.completion.chunk',
-          choices: [
-            {
-              index: 0, delta: result.event == 'error' ? {
-                content: '\n[内容由于不合规被停止生成，我们换个话题吧]'
-              } : {}, finish_reason: lengthExceed ? 'length' : 'stop'
-            }
-          ],
-          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
-          segment_id: segmentId,
-          created
-        })}\n\n`;
-        !transStream.closed && transStream.write(data);
-        !transStream.closed && transStream.end('data: [DONE]\n\n');
-        endCallback && endCallback();
-      }
-      else if (!silentSearch && result.event == 'search_plus' && result.msg && result.msg.type == 'get_res') {
-        if (!searchFlag)
-          searchFlag = true;
-        webSearchCount += 1;
-        const data = `data: ${JSON.stringify({
-          id: convId,
-          model,
-          object: 'chat.completion.chunk',
-          choices: [
-            {
-              index: 0, delta: {
-                content: `【检索 ${webSearchCount}】 [${result.msg.title}](${result.msg.url})\n`
-              }, finish_reason: null
-            }
-          ],
-          segment_id: segmentId,
-          created
-        })}\n\n`;
-        !transStream.closed && transStream.write(data);
-      }
+        const payload = JSON.parse(Buffer.from(token.split('.')[1], 'base64').toString());
+        return payload.sub;
+    } catch (e) {
+        return undefined;
     }
-    catch (err) {
-      logger.error(err);
-      !transStream.closed && transStream.end('\n\n');
-    }
-  });
-  stream.on("data", buffer => parser.feed(buffer.toString()));
-  stream.once("error", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
-  stream.once("close", () => !transStream.closed && transStream.end('data: [DONE]\n\n'));
-  return transStream;
 }
 
 /**
- * Token切分
+ * 使用 Connect RPC 创建流式聊天补全
  */
-function tokenSplit(authorization: string) {
-  return authorization.replace('Bearer ', '').split(',');
-}
+export async function createCompletionStreamV2(
+    model: string,
+    messages: any[],
+    authToken: string
+): Promise<PassThrough> {
+    logger.info(`Using Connect RPC API (streaming) with model: ${model}`);
 
-/**
- * 获取Token存活状态
- */
-async function getTokenLiveStatus(refreshToken: string) {
-  const result = await axios.get('https://kimi.moonshot.cn/api/auth/token/refresh', {
-    headers: {
-      Authorization: `Bearer ${refreshToken}`,
-      Referer: 'https://kimi.moonshot.cn/',
-      ...FAKE_HEADERS
-    },
-    timeout: 15000,
-    validateStatus: () => true
-  });
-  try {
-    const {
-      access_token,
-      refresh_token
-    } = checkResult(result, refreshToken);
-    return !!(access_token && refresh_token)
-  }
-  catch (err) {
-    return false;
-  }
-}
+    const tokenType = detectTokenType(authToken);
 
-export default {
-  createConversation,
-  createCompletion,
-  createCompletionStream,
-  getTokenLiveStatus,
-  tokenSplit
-};
+    if (tokenType !== 'jwt') {
+        throw new APIException(
+            EX.API_REQUEST_FAILED,
+            'Connect RPC requires JWT token. Please extract kimi-auth from browser cookies.'
+        );
+    }
+
+    const messageContent = buildFullPrompt(messages);
+
+    const config: ConnectConfig = {
+        baseUrl: 'https://www.kimi.com',
+        authToken: authToken,
+        deviceId: extractDeviceIdFromJWT(authToken),
+        sessionId: extractSessionIdFromJWT(authToken),
+        userId: extractUserIdFromJWT(authToken),
+    };
+
+    const client = new ConnectRPCClient(config);
+
+    const { scenario, thinking } = resolveScenario(model);
+    logger.info(`Model: ${model} → scenario: ${scenario}, thinking: ${thinking}`);
+
+    const stream = new PassThrough();
+
+    (async () => {
+        try {
+            const connectMessages = await client.chat(messageContent, {
+                scenario: scenario as any,
+                thinking,
+            });
+
+            for (const msg of connectMessages) {
+                if (msg.block?.text?.content) {
+                    const chunk = {
+                        id: util.uuid(),
+                        object: 'chat.completion.chunk',
+                        created: util.unixTimestamp(),
+                        model: model,
+                        choices: [
+                            {
+                                index: 0,
+                                delta: {
+                                    content: msg.block.text.content,
+                                },
+                                finish_reason: null,
+                            },
+                        ],
+                    };
+
+                    stream.write(`data: ${JSON.stringify(chunk)}\n\n`);
+                }
+
+                if (msg.done) {
+                    const endChunk = {
+                        id: util.uuid(),
+                        object: 'chat.completion.chunk',
+                        created: util.unixTimestamp(),
+                        model: model,
+                        choices: [
+                            {
+                                index: 0,
+                                delta: {},
+                                finish_reason: 'stop',
+                            },
+                        ],
+                    };
+
+                    stream.write(`data: ${JSON.stringify(endChunk)}\n\n`);
+                    stream.write('data: [DONE]\n\n');
+                    break;
+                }
+            }
+
+            stream.end();
+        } catch (error) {
+            logger.error(`Connect RPC stream error: ${error}`);
+            stream.destroy(error as Error);
+        }
+    })();
+
+    return stream;
+}
