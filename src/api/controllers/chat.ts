@@ -17,9 +17,10 @@ import type { ConnectConfig } from '@/lib/connect-rpc/types.ts';
 // 模型名称
 const MODEL_NAME = 'kimi';
 // 设备ID
-const DEVICE_ID = Math.random() * 999999999999999999 + 7000000000000000000;
+// Use BigInt arithmetic to avoid JS float precision loss on large integers
+const DEVICE_ID = String(BigInt(7000000000000000000) + BigInt(Math.floor(Math.random() * 999999999999999999)));
 // SessionID
-const SESSION_ID = Math.random() * 99999999999999999 + 1700000000000000000;
+const SESSION_ID = String(BigInt(1700000000000000000) + BigInt(Math.floor(Math.random() * 99999999999999999)));
 // access_token有效期
 const ACCESS_TOKEN_EXPIRES = 300;
 // 最大重试次数
@@ -605,6 +606,8 @@ function extractRefFileUrls(messages: any[]) {
  * 消息预处理
  */
 function messagesPrepare(messages: any[], isRefConv = false) {
+  // Work on a shallow copy to avoid mutating the caller's array (which breaks retries)
+  messages = [...messages];
   let content;
   if (isRefConv || messages.length < 2) {
     content = messages.reduce((content, message) => {
