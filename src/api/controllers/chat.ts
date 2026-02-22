@@ -608,49 +608,42 @@ function extractRefFileUrls(messages: any[]) {
 function messagesPrepare(messages: any[], isRefConv = false) {
   // Work on a shallow copy to avoid mutating the caller's array (which breaks retries)
   messages = [...messages];
-  let content;
-  if (isRefConv || messages.length < 2) {
-    content = messages.reduce((content, message) => {
-      if (_.isArray(message.content)) {
-        return message.content.reduce((_content, v) => {
-          if (!_.isObject(v) || v['type'] != 'text') return _content;
-          return _content + `${v["text"] || ""}\n`;
-        }, content);
-      }
-      return content += `${message.role == 'user' ? wrapUrlsToTags(message.content) : message.content}\n`;
-    }, '')
-    logger.info("\n透传内容：\n" + content);
-  }
-  else {
-    let latestMessage = messages[messages.length - 1];
-    let hasFileOrImage = Array.isArray(latestMessage.content)
-      && latestMessage.content.some(v => (typeof v === 'object' && ['file', 'image_url'].includes(v['type'])));
-    if (hasFileOrImage) {
-      let newFileMessage = {
-        "content": "关注用户最新发送文件和消息",
-        "role": "system"
-      };
-      messages.splice(messages.length - 1, 0, newFileMessage);
-      logger.info("注入提升尾部文件注意力system prompt");
-    } else {
-      let newTextMessage = {
-        "content": "关注用户最新的消息",
-        "role": "system"
-      };
-      messages.splice(messages.length - 1, 0, newTextMessage);
-      logger.info("注入提升尾部消息注意力system prompt");
+
+  const extractText = (message: any): string => {
+    if (_.isArray(message.content)) {
+      return message.content.reduce((_content: string, v: any) => {
+        if (!_.isObject(v) || v['type'] != 'text') return _content;
+        return _content + `${v["text"] || ""}`;
+      }, '');
     }
-    content = messages.reduce((content, message) => {
-      if (_.isArray(message.content)) {
-        return message.content.reduce((_content, v) => {
-          if (!_.isObject(v) || v['type'] != 'text') return _content;
-          return _content + `${message.role || "user"}:${v["text"] || ""}\n`;
-        }, content);
-      }
-      return content += `${message.role || "user"}:${message.role == 'user' ? wrapUrlsToTags(message.content) : message.content}\n`;
-    }, '')
-    logger.info("\n对话合并：\n" + content);
+    return message.role == 'user' ? wrapUrlsToTags(message.content) : (message.content || '');
+  };
+
+  // Separate system messages from conversation turns
+  const systemMessages = messages.filter(m => m.role === 'system');
+  const conversationMessages = messages.filter(m => m.role !== 'system');
+
+  // Build system prompt block
+  const systemPrompt = systemMessages.map(m => extractText(m)).filter(Boolean).join('\n');
+
+  // Build conversation history with role labels
+  const conversationHistory = conversationMessages.map(m => {
+    const role = m.role === 'assistant' ? 'assistant' : 'user';
+    return `${role}: ${extractText(m)}`;
+  }).join('\n');
+
+  // Frame the full prompt so Kimi knows to only respond as the assistant character
+  let content = '';
+  if (systemPrompt) {
+    content += `[Instructions - follow these exactly]:\n${systemPrompt}\n\n`;
   }
+  content += `[IMPORTANT: Only write the response for "assistant". Never write lines for "user". Continue the roleplay/conversation as the assistant only.]\n\n`;
+  if (conversationHistory) {
+    content += `[Conversation history]:\n${conversationHistory}\n\n`;
+  }
+  content += `assistant:`;
+
+  logger.info("\n构建提示词：\n" + content);
 
   return [
     { role: 'user', content }
@@ -859,6 +852,8 @@ async function receiveStream(model: string, convId: string, stream: any): Promis
           throw new Error(`Stream response invalid: ${event.data}`);
         if (result.event == 'cmpl' && result.text) {
           data.choices[0].message.content += result.text;
+          // Strip <think>...</think> blocks from assembled content
+          data.choices[0].message.content = data.choices[0].message.content.replace(/<think>[\s\S]*?<\/think>/g, '').trimStart();
         }
         else if (result.event == 'req') {
           data.segment_id = result.id;
@@ -919,6 +914,8 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
     segment_id: '',
     created
   })}\n\n`);
+  let thinkBuffer = '';
+  let insideThink = false;
   const parser = createParser(event => {
     try {
       if (event.type !== "event") return;
@@ -927,7 +924,32 @@ function createTransStream(model: string, convId: string, stream: any, endCallba
         throw new Error(`Stream response invalid: ${event.data}`);
       if (result.event == 'cmpl') {
         const exceptCharIndex = result.text.indexOf("᛫");
-        const chunk = result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
+        let chunk: string = result.text.substring(0, exceptCharIndex == -1 ? result.text.length : exceptCharIndex);
+
+        // Handle <think> blocks: buffer and suppress from output
+        if (!insideThink && chunk.includes('<think>')) {
+          insideThink = true;
+          const beforeThink = chunk.substring(0, chunk.indexOf('<think>'));
+          thinkBuffer = chunk.substring(chunk.indexOf('<think>'));
+          chunk = beforeThink;
+          if (thinkBuffer.includes('</think>')) {
+            chunk += thinkBuffer.substring(thinkBuffer.indexOf('</think>') + '</think>'.length);
+            thinkBuffer = '';
+            insideThink = false;
+          }
+        } else if (insideThink) {
+          thinkBuffer += chunk;
+          if (thinkBuffer.includes('</think>')) {
+            chunk = thinkBuffer.substring(thinkBuffer.indexOf('</think>') + '</think>'.length);
+            thinkBuffer = '';
+            insideThink = false;
+          } else {
+            chunk = ''; // still inside think block, suppress
+          }
+        }
+
+        if (!chunk) return; // nothing to send
+
         const data = `data: ${JSON.stringify({
           id: convId,
           model,
